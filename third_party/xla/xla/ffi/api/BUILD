@@ -88,6 +88,16 @@ cc_library(
     deps = [
         ":api",
         ":c_api",
+        ":record_context",
+    ],
+)
+
+cc_library(
+    name = "record_context",
+    hdrs = ["record_context.h"],
+    deps = [
+        ":api",
+        ":c_api",
     ],
 )
 

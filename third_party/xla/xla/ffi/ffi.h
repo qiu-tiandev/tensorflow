@@ -21,7 +21,6 @@ limitations under the License.
        See README.md for more details.
 #endif  // XLA_FFI_API_FFI_H_
 
-#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -29,6 +28,7 @@ limitations under the License.
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 
 // IWYU pragma: begin_exports
 #include "xla/ffi/api/api.h"
@@ -47,6 +47,7 @@ limitations under the License.
 #include "xla/executable_run_options.h"
 #include "xla/ffi/api/c_api.h"
 #include "xla/ffi/api/c_api_internal.h"  // IWYU pragma: keep
+#include "xla/ffi/api/record_context.h"
 #include "xla/ffi/execution_context.h"
 #include "xla/ffi/execution_state.h"
 #include "xla/ffi/type_registry.h"
@@ -580,6 +581,19 @@ struct CtxDecoding<Context> {
   }
 };
 
+inline XLA_FFI_Error* AbslStatusToFFIError(absl::Status status) {
+  if (status.ok()) {
+    return nullptr;
+  }
+  XLA_FFI_Error_Create_Args args;
+  args.struct_size = XLA_FFI_Error_Create_Args_STRUCT_SIZE;
+  args.extension_start = nullptr;
+  args.errc = static_cast<XLA_FFI_Error_Code>(status.code());
+  std::string msg = std::string(status.message());
+  args.message = msg.c_str();
+  return XLA_FFI_GetApi()->XLA_FFI_Error_Create(&args);
+}
+
 //===----------------------------------------------------------------------===//
 // Context decoding
 //===----------------------------------------------------------------------===//
@@ -603,6 +617,46 @@ static std::optional<T> DecodeInternalCtx(const XLA_FFI_Api* api,
   return reinterpret_cast<T>(result);
 }
 
+inline absl::Status ConvertError(XLA_FFI_Error* err) {
+  const XLA_FFI_Api* api = XLA_FFI_GetApi();
+  std::string msg = internal::GetErrorMessage(api, err);
+  internal::DestroyError(api, err);
+  return absl::InternalError(std::move(msg));
+}
+
+struct ErrorConverter {
+  template <typename T>
+  static absl::StatusOr<T> ToStatusOr(T value, XLA_FFI_Error* err) {
+    if (err) {
+      return ConvertError(err);
+    }
+    return value;
+  }
+  static absl::Status ToStatus(XLA_FFI_Error* err) {
+    if (err) {
+      return ConvertError(err);
+    }
+    return absl::OkStatus();
+  }
+  static absl::Status ResourceExhaustedError(absl::string_view msg) {
+    return absl::ResourceExhaustedError(msg);
+  }
+  static absl::Status Success() { return absl::OkStatus(); }
+};
+
+}  // namespace internal
+
+class RecordContext : public internal::RecordContext<internal::ErrorConverter> {
+  using Base = internal::RecordContext<internal::ErrorConverter>;
+
+ public:
+  using Base::Base;
+  using Base::Tag;
+};
+
+// Explicitly instantiate `Decode` instances for internal API.
+namespace internal {
+template struct Decode<CtxTag<ffi::RecordContext, RecordCtxTag>>;
 }  // namespace internal
 
 template <>

@@ -44,6 +44,7 @@ limitations under the License.
 #include <vector>
 
 #include "xla/ffi/api/c_api.h"
+#include "xla/ffi/api/record_context.h"  // IWYU pragma: export
 
 // IWYU pragma: begin_exports
 #include "xla/ffi/api/api.h"
@@ -914,6 +915,52 @@ struct internal::Decode<internal::RemainingArgsTag> {
     return RemainingArgs(&ctx.call_frame->args, offsets.args);
   }
 };
+
+namespace internal {
+
+inline Error ConvertError(XLA_FFI_Error* err) {
+  const XLA_FFI_Api* api = XLA_FFI_GetApi();
+  std::string msg = internal::GetErrorMessage(api, err);
+  internal::DestroyError(api, err);
+  return Error(ErrorCode::kInternal, std::move(msg));
+}
+
+// Error converter for external XLA:FFI.
+struct ErrorConverter {
+  template <typename T>
+  static xla::ffi::ErrorOr<T> ToStatusOr(T value, XLA_FFI_Error* err) {
+    if (err) {
+      return xla::ffi::Unexpected(ConvertError(err));
+    }
+    return value;
+  }
+
+  static xla::ffi::Error ToStatus(XLA_FFI_Error* err) {
+    if (err) {
+      return ConvertError(err);
+    }
+    return xla::ffi::Error::Success();  // PASS-THROUGH
+  }
+
+  static xla::ffi::Error ResourceExhaustedError(std::string_view msg) {
+    return xla::ffi::Error(ErrorCode::kResourceExhausted, std::string(msg));
+  }
+
+  static xla::ffi::Error Success() { return xla::ffi::Error::Success(); }
+};
+}  // namespace internal
+
+class RecordContext : public internal::RecordContext<internal::ErrorConverter> {
+  using Base = internal::RecordContext<internal::ErrorConverter>;
+
+ public:
+  using Base::Base;
+};
+
+// Explicitly instantiate `Decode` instances for external API.
+namespace internal {
+template struct Decode<CtxTag<ffi::RecordContext, RecordCtxTag>>;
+}  // namespace internal
 
 //===----------------------------------------------------------------------===//
 // Results decoding

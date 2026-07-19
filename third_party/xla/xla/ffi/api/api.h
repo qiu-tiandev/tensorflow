@@ -189,6 +189,8 @@ inline std::ostream& operator<<(std::ostream& os,
       return os << "initialize";
     case XLA_FFI_ExecutionStage_EXECUTE:
       return os << "execute";
+    case XLA_FFI_ExecutionStage_RECORD:
+      return os << "record";
   }
 }
 
@@ -242,6 +244,7 @@ enum class ExecutionStage : uint8_t {
   kPrepare = XLA_FFI_ExecutionStage_PREPARE,
   kInitialize = XLA_FFI_ExecutionStage_INITIALIZE,
   kExecute = XLA_FFI_ExecutionStage_EXECUTE,
+  kRecord = XLA_FFI_ExecutionStage_RECORD,
 };
 
 enum class Traits : uint32_t {
@@ -295,6 +298,9 @@ class Ffi {
 
   // Creates an empty binding for the execute stage.
   static Binding<ExecutionStage::kExecute> BindExecute();
+
+  // Creates an empty binding for the record stage.
+  static Binding<ExecutionStage::kRecord> BindRecord();
 
   // Automatic FFI binding that does binding specification inference from the
   // `fn` type signature and binds `fn` to it. This enables a more concise FFI
@@ -558,8 +564,30 @@ struct AttrTag {};
 template <typename T>
 struct AttrsTag {};
 
-// A type tag to distinguish parameter extracted from an execution context.
+// TagOf is a helper that allows partial specialization on CtxTags.
+//
+// Give a type:
+//   struct MyTag {};
+//   template <typename T>
+//   struct MyType { using Tag = MyTag; };
+//
+// A generic decode function for it can be written as:
+//   template <typename T>
+//   struct Decode<CtxTag<T, MyTag>> { ... };
+//
+// And then decoded from internal an external API using:
+//   1. template struct Decode<CtxTag<MyType<InternalType>, MyTag>>;
+//   2. template struct Decode<CtxTag<MyType<ExternalType>, MyTag>>;
+//
+// Default type Tag dispatch.
 template <typename T>
+struct TagOf {
+  using Type = void;
+};
+
+// A type tag to distinguish parameters extracted from an execution context.
+// Specialization of TagOf is required for custom CtxTags.
+template <typename T, typename Tag = typename TagOf<T>::Type>
 struct CtxTag {};
 
 //----------------------------------------------------------------------------//
@@ -710,6 +738,11 @@ class Binding {
     return {std::move(*this)};
   }
 
+  template <typename T, typename Tag>
+  Binding<stage, Ts..., internal::CtxTag<T, Tag>> Ctx() && {
+    return {std::move(*this)};
+  }
+
   Binding<stage, Ts..., internal::CtxTag<Context>> Ctx() && {
     return {std::move(*this)};
   }
@@ -773,6 +806,10 @@ inline Binding<ExecutionStage::kInitialize> Ffi::BindInitialize() {
 
 inline Binding<ExecutionStage::kExecute> Ffi::BindExecute() {
   return Bind<ExecutionStage::kExecute>();
+}
+
+inline Binding<ExecutionStage::kRecord> Ffi::BindRecord() {
+  return Bind<ExecutionStage::kRecord>();
 }
 
 //===----------------------------------------------------------------------===//
@@ -1308,7 +1345,7 @@ struct Decode<AttrTag<T>> {
 };
 
 template <typename T>
-struct Decode<CtxTag<T>> {
+struct Decode<CtxTag<T, void>> {
   using R = typename CtxDecoding<T>::Type;
 
   XLA_FFI_ATTRIBUTE_ALWAYS_INLINE
@@ -1561,10 +1598,23 @@ class ContextBase {
 // FFI (`absl::StatusOr` vs `ffi::ErrorOr`).
 class RemainingArgs;
 class RemainingRets;
+class RecordContext;
+class BoundedCommandVector;
+class RecordCtxTag;
+enum class RecordAction;
 
 namespace internal {
+template <>
+struct TagOf<RecordContext> {
+  using Type = RecordCtxTag;
+};
+template <>
+struct TagOf<RecordAction> {
+  using Type = RecordAction;
+};
+
 // A helper struct to extract the type of the handler argument.
-template <typename T>
+template <typename T, typename Tag = typename TagOf<T>::Type>
 struct FnArgType;
 
 template <typename T>
@@ -1608,8 +1658,13 @@ struct FnArgType<internal::AttrsTag<T>> {
 };
 
 template <typename T>
-struct FnArgType<internal::CtxTag<T>> {
+struct FnArgType<internal::CtxTag<T, void>> {
   using Type = typename CtxDecoding<T>::Type;
+};
+
+template <typename T, typename Tag>
+struct FnArgType<internal::CtxTag<T, Tag>> {
+  using Type = T;
 };
 
 // A template to detect result encodings that are state constructors. We use
