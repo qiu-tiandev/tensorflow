@@ -14,11 +14,13 @@ limitations under the License.
 ==============================================================================*/
 
 // See docs in ../ops/candidate_sampling_ops.cc.
-
+#include <cfloat>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "absl/log/check.h"
 #include "absl/status/status.h"
@@ -26,14 +28,13 @@ limitations under the License.
 #include "absl/types/span.h"
 #define EIGEN_USE_THREADS
 
-#include <cfloat>
-#include <vector>
-
 #include "absl/container/flat_hash_map.h"
 #include "tensorflow/core/framework/op_kernel.h"
+#include "tensorflow/core/framework/op_requires.h"
 #include "tensorflow/core/framework/tensor_shape.h"
+#include "tensorflow/core/framework/types.h"
 #include "tensorflow/core/kernels/range_sampler.h"
-#include "tensorflow/core/platform/logging.h"
+#include "tensorflow/core/lib/random/simple_philox.h"
 #include "tensorflow/core/util/guarded_philox_random.h"
 
 namespace tensorflow {
@@ -170,6 +171,12 @@ class FixedUnigramCandidateSamplerOp : public BaseCandidateSamplerOp {
       : BaseCandidateSamplerOp(context) {
     int64_t range_max;
     OP_REQUIRES_OK(context, context->GetAttr("range_max", &range_max));
+    OP_REQUIRES(context, range_max > 0,
+                absl::InvalidArgumentError("range_max must be positive."));
+    // Limit range_max to prevent OOM when constructing the weights vector.
+    OP_REQUIRES(
+        context, range_max < std::numeric_limits<int32_t>::max(),
+        absl::InvalidArgumentError("range_max exceeds safe vector limits."));
     std::string vocab_file;
     OP_REQUIRES_OK(context, context->GetAttr("vocab_file", &vocab_file));
     std::vector<float> unigrams;
@@ -185,10 +192,22 @@ class FixedUnigramCandidateSamplerOp : public BaseCandidateSamplerOp {
     int64_t num_reserved_ids;
     OP_REQUIRES_OK(context,
                    context->GetAttr("num_reserved_ids", &num_reserved_ids));
+    OP_REQUIRES(
+        context, num_reserved_ids >= 0,
+        absl::InvalidArgumentError("num_reserved_ids must be non-negative."));
+    OP_REQUIRES(
+        context, num_reserved_ids <= range_max,
+        absl::InvalidArgumentError("num_reserved_ids must be <= range_max."));
     int64_t num_shards;
     OP_REQUIRES_OK(context, context->GetAttr("num_shards", &num_shards));
     int64_t shard;
     OP_REQUIRES_OK(context, context->GetAttr("shard", &shard));
+    OP_REQUIRES(
+        context, num_shards > 0,
+        absl::InvalidArgumentError("num_shards must be strictly positive."));
+    OP_REQUIRES(
+        context, shard >= 0 && shard < num_shards,
+        absl::InvalidArgumentError("shard must be in [0, num_shards)."));
     FixedUnigramSampler* sampler = new FixedUnigramSampler(
         range_max, distortion, num_reserved_ids, num_shards, shard);
     if (!vocab_file.empty())
@@ -254,19 +273,20 @@ class ComputeAccidentalHitsOp : public OpKernel {
     }
 
     Tensor* out_indices = nullptr;
-    OP_REQUIRES_OK(
-        context,
-        context->allocate_output(
-            0, TensorShape({static_cast<int>(indices.size())}), &out_indices));
+    OP_REQUIRES_OK(context,
+                   context->allocate_output(
+                       0, TensorShape({static_cast<int64_t>(indices.size())}),
+                       &out_indices));
     Tensor* out_ids = nullptr;
     OP_REQUIRES_OK(
-        context, context->allocate_output(
-                     1, TensorShape({static_cast<int>(ids.size())}), &out_ids));
-    Tensor* out_weights = nullptr;
-    OP_REQUIRES_OK(
         context,
         context->allocate_output(
-            2, TensorShape({static_cast<int>(weights.size())}), &out_weights));
+            1, TensorShape({static_cast<int64_t>(ids.size())}), &out_ids));
+    Tensor* out_weights = nullptr;
+    OP_REQUIRES_OK(context,
+                   context->allocate_output(
+                       2, TensorShape({static_cast<int64_t>(weights.size())}),
+                       &out_weights));
 
     for (size_t i = 0; i < indices.size(); ++i) {
       out_indices->vec<int32_t>()(i) = indices[i];
